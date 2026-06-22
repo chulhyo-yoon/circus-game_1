@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Retro Circus Remake Demo</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin:0; min-height:100%; background:#070812; color:#fff; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { display:grid; place-items:center; }
+    .wrap { text-align:center; padding:16px; }
+    h1 { margin:0 0 10px; font-size:28px; letter-spacing:.5px; text-shadow:0 2px 0 #000, 0 0 16px rgba(255,210,80,.45); }
+    canvas {
+      width:min(96vw, 1032px);
+      height:auto;
+      background:#000;
+      border:8px solid #f7d98b;
+      border-radius:18px;
+      box-shadow:0 24px 80px rgba(0,0,0,.75), 0 0 0 3px #6b3214 inset, 0 0 42px rgba(255,184,60,.18);
+      image-rendering:auto;
+    }
+    .hint { margin-top:10px; color:#f5e7c7; font-size:14px; }
+    button {
+      margin-top:10px; padding:9px 16px; border:0; border-radius:999px; cursor:pointer;
+      font-weight:800; background:linear-gradient(#fff2a8,#e59a2e); color:#3b1b08;
+      box-shadow:0 4px 0 #8b4b13;
+    }
+    button:active { transform:translateY(2px); box-shadow:0 2px 0 #8b4b13; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🎪 Retro Circus Remake Demo</h1>
+    <canvas id="game" width="1032" height="552" tabindex="0"></canvas>
+    <div class="hint">조작: ← → 이동 · Space / ↑ / 클릭 = 점프 · R = 재시작</div>
+    <button tabindex="-1" onclick="restart(); this.blur();">재시작</button>
+  </div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const groundY = 420;
+const ropeY = 292;
+const keys = { left:false, right:false };
+let vx = 0;
+
+let player, obstacles, particles, stage, score, best, speed, frame, gameOver, started, stageClearTimer, targetPasses, checkpointStage, lives, flashTimer;
+best = Number(localStorage.getItem('retro-circus-remake-best') || 0);
+
+const clamp = (v,min,max)=>Math.max(min, Math.min(max, v));
+function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();}
+function ellipseShadow(x,y,rx,ry,a=.28){ctx.fillStyle=`rgba(0,0,0,${a})`;ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fill();}
+
+function resetPlayer() {
+  if (stage === 1) player = { x:120, y:groundY-92, w:112, h:92, vy:0, onGround:true };
+  else player = { x:135, y:ropeY-92, w:58, h:92, vy:0, onGround:true };
+}
+
+function reset() {
+  stage=1; score=0; lives=3; speed=4.10; frame=0; obstacles=[]; particles=[];
+  gameOver=false; started=false; stageClearTimer=0; targetPasses=0; checkpointStage=1; flashTimer=0; vx=0;
+  resetPlayer();
+}
+function setupStage(newStage, keepStarted=false) {
+  stage=newStage; obstacles=[]; particles=[]; frame=0; targetPasses=0; stageClearTimer=0;
+  gameOver=false; started=keepStarted; vx=0; speed=stage===1?4.10:3.4; resetPlayer();
+}
+function restart(){ reset(); }
+
+function jump() {
+  if (gameOver) { restart(); return; }
+  started = true;
+  if (stageClearTimer > 0) return;
+  if (player.onGround) { player.vy = -7.4; player.onGround=false; }
+}
+
+window.addEventListener('keydown', e=>{
+  if(e.code==='ArrowLeft') keys.left=true;
+  if(e.code==='ArrowRight') keys.right=true;
+  if(e.code==='Space'||e.code==='ArrowUp'){ e.preventDefault(); document.activeElement?.blur(); jump(); }
+  if(e.code==='KeyR'){ e.preventDefault(); restart(); }
+});
+window.addEventListener('keyup', e=>{
+  if(e.code==='ArrowLeft') keys.left=false;
+  if(e.code==='ArrowRight') keys.right=false;
+});
+canvas.addEventListener('pointerdown', e=>{ canvas.focus(); jump(); });
+
+function addRing(){
+  obstacles.push({type:'ring', x:W+60, y:groundY-280, w:224, h:280, passed:false, enteredOpening:false});
+}
+function addMonkey(){
+  obstacles.push({type:'monkey', x:W+60, y:ropeY-38, w:52, h:42, passed:false, phase:frame});
+}
+function rectsOverlap(a,b,pad=8){return a.x+pad<b.x+b.w && a.x+a.w-pad>b.x && a.y+pad<b.y+b.h && a.y+a.h-pad>b.y;}
+
+function stageOneRingCheck(ring){
+  const cx=player.x+player.w*.62, cy=player.y+player.h*.48;
+  const ringCx=ring.x+ring.w/2, ringCy=ring.y+ring.h/2;
+  const dx=Math.abs(cx-ringCx), dy=Math.abs(cy-ringCy);
+  const insideOpening = dx < ring.w*.36 && dy < ring.h*.38;
+  if(insideOpening) ring.enteredOpening=true;
+  if(!ring.passed && ring.x+ring.w < player.x + player.w*.45) return ring.enteredOpening?'pass':'miss';
+  return 'none';
+}
+
+function advanceStage(){
+  checkpointStage=2; stage=2; obstacles=[]; particles=[]; frame=0; speed=3.4; targetPasses=0; stageClearTimer=90; vx=0; resetPlayer();
+}
+function winGame(){
+  gameOver=true; started=false; stageClearTimer=-999; best=Math.max(best,score);
+  localStorage.setItem('retro-circus-remake-best',best);
+}
+function fail(){
+  lives--; flashTimer=20; best=Math.max(best,score); localStorage.setItem('retro-circus-remake-best',best);
+  if(lives<=0){ gameOver=true; return; }
+  if(stage===2 || checkpointStage===2){ setupStage(2,false); score=Math.max(score,500); stageClearTimer=75; return; }
+  setupStage(1,false); stageClearTimer=55;
+}
+
+function burst(x,y,color,n=22){ /* particles disabled */ }
+
+function updateParticles(){ /* particles disabled */ }
+function drawParticles(){ /* particles disabled */ }
+
+function update(){
+  if(!started || gameOver){ updateParticles(); return; }
+  frame++; speed += stage===1 ? .0008 : .0011;
+  if(stageClearTimer>0){ stageClearTimer--; updateParticles(); return; }
+
+  const accel=stage===1?.45:.35, maxSpeed=stage===1?6.5:5.0;
+  if(keys.left) vx-=accel;
+  if(keys.right) vx+=accel;
+  if(!keys.left && !keys.right) vx*=.88;
+  vx=clamp(vx,-maxSpeed,maxSpeed);
+  player.x+=vx;
+  if(player.x<24){player.x=24;vx=0;}
+  if(player.x>W-player.w-24){player.x=W-player.w-24;vx=0;}
+
+  player.vy += .25;
+  player.y += player.vy;
+  const baseY=stage===1?groundY-player.h:ropeY-player.h;
+  if(player.y>=baseY){ player.y=baseY; player.vy=0; player.onGround=true; }
+
+  if(stage===1 && frame%170===0) addRing();
+  if(stage===2 && frame%105===0) addMonkey();
+
+  for(const o of obstacles){
+    o.x -= speed;
+    if(o.type==='ring'){
+      const r=stageOneRingCheck(o);
+      if(r==='miss') fail();
+      if(r==='pass'){ o.passed=true; targetPasses++; score+=100; burst(o.x+o.w/2,o.y+o.h/2,'#ffd45a',28); if(targetPasses>=5) advanceStage(); }
+    } else {
+      if(!o.passed && o.x+o.w<player.x){ o.passed=true; targetPasses++; score+=80; if(targetPasses>=8) winGame(); }
+      if(rectsOverlap(player,o,7)) fail();
+    }
+  }
+  obstacles=obstacles.filter(o=>o.x>-180);
+  updateParticles();
+  if(flashTimer>0) flashTimer--;
+}
+
+function drawBackground(){
+  const sky=ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#15376e'); sky.addColorStop(.42,'#35a1d9'); sky.addColorStop(.69,'#f5b66b'); sky.addColorStop(1,'#713316');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+
+  // marquee lights
+  for(let i=0;i<18;i++){
+    const x=i*64+(frame*.25%64);
+    ctx.fillStyle=`rgba(255,230,130,${.25+Math.sin(frame/12+i)*.15})`;
+    ctx.beginPath(); ctx.arc(x,36,8,0,Math.PI*2); ctx.fill();
+  }
+
+  // crowd silhouettes
+  ctx.fillStyle='#172032';
+  for(let i=0;i<42;i++){
+    const x=i*25, h=18+((i*17)%24);
+    ctx.beginPath(); ctx.arc(x+10,300-h,8,0,Math.PI*2); ctx.fill();
+    ctx.fillRect(x+3,300-h,15,h+10);
+  }
+  ctx.fillStyle='rgba(255,255,255,.08)';
+  for(let i=0;i<36;i++){ ctx.fillRect(i*30+5,285+Math.sin(frame/16+i)*3,12,4); }
+
+  // tent canopy
+  ctx.fillStyle='#8e1521';
+  for(let x=-80;x<W+100;x+=160){ ctx.beginPath(); ctx.moveTo(x,316); ctx.lineTo(x+80,102); ctx.lineTo(x+160,316); ctx.closePath(); ctx.fill(); }
+  ctx.fillStyle='#fff0c4';
+  for(let x=0;x<W+100;x+=160){ ctx.beginPath(); ctx.moveTo(x,316); ctx.lineTo(x+80,102); ctx.lineTo(x+160,316); ctx.closePath(); ctx.fill(); }
+
+  // stage lights
+  for(let i=0;i<6;i++){
+    const x=80+i*170;
+    ctx.fillStyle='rgba(255,245,190,.12)';
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x+60,0); ctx.lineTo(x+150,H); ctx.lineTo(x-110,H); ctx.closePath(); ctx.fill();
+  }
+
+  const v=ctx.createRadialGradient(W/2,H/2,140,W/2,H/2,720);
+  v.addColorStop(0,'rgba(255,255,255,0)'); v.addColorStop(1,'rgba(0,0,0,.35)');
+  ctx.fillStyle=v; ctx.fillRect(0,0,W,H);
+}
+
+function drawFloor(){
+  const g=ctx.createLinearGradient(0,groundY,0,H);
+  g.addColorStop(0,'#e9b05a'); g.addColorStop(.45,'#c47831'); g.addColorStop(1,'#632b10');
+  ctx.fillStyle=g; ctx.fillRect(0,groundY,W,H-groundY);
+  ctx.fillStyle='#4c210d'; ctx.fillRect(0,groundY,W,10);
+  ctx.fillStyle='rgba(255,230,160,.18)';
+  for(let x=-((frame*speed)%48);x<W;x+=48) ctx.fillRect(x,groundY+28,30,4);
+}
+function drawRopeStage(){
+  const bg=ctx.createLinearGradient(0,275,0,H);
+  bg.addColorStop(0,'#b8f0ff'); bg.addColorStop(.6,'#4d92a5'); bg.addColorStop(1,'#1c4554');
+  ctx.fillStyle=bg; ctx.fillRect(0,275,W,H-275);
+  ctx.strokeStyle='#2a1608'; ctx.lineWidth=8; ctx.beginPath(); ctx.moveTo(0,ropeY); ctx.lineTo(W,ropeY); ctx.stroke();
+  ctx.strokeStyle='#c78b48'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(0,ropeY-3); ctx.lineTo(W,ropeY-3); ctx.stroke();
+  ctx.fillStyle='#5b3218'; rr(56,ropeY,22,145,6); ctx.fill(); rr(W-78,ropeY,22,145,6); ctx.fill();
+  ctx.fillStyle='#251206'; ctx.fillRect(40,ropeY+140,54,10); ctx.fillRect(W-94,ropeY+140,54,10);
+}
+
+function drawRing(o){
+  const cx=o.x+o.w/2, cy=o.y+o.h/2;
+  const outerRx=o.w*.44, outerRy=o.h*.46, innerRx=o.w*.34, innerRy=o.h*.36;
+
+  const glow=ctx.createRadialGradient(cx,cy,innerRx*.3,cx,cy,outerRy*1.45);
+  glow.addColorStop(0,'rgba(255,230,80,.05)'); glow.addColorStop(.52,'rgba(255,105,0,.26)'); glow.addColorStop(1,'rgba(255,40,0,0)');
+  ctx.fillStyle=glow; ctx.beginPath(); ctx.ellipse(cx,cy,outerRx+42,outerRy+42,0,0,Math.PI*2); ctx.fill();
+
+  ctx.lineWidth=18; ctx.strokeStyle='#3b1200'; ctx.beginPath(); ctx.ellipse(cx,cy,outerRx,outerRy,0,0,Math.PI*2); ctx.stroke();
+  ctx.lineWidth=11; ctx.strokeStyle='#ff8a00'; ctx.beginPath(); ctx.ellipse(cx,cy,outerRx,outerRy,0,0,Math.PI*2); ctx.stroke();
+  ctx.lineWidth=3; ctx.strokeStyle='#fff4a5'; ctx.beginPath(); ctx.ellipse(cx,cy,innerRx,innerRy,0,0,Math.PI*2); ctx.stroke();
+
+  for(let i=0;i<42;i++){
+    const a=i/42*Math.PI*2, flicker=8+Math.sin(frame/4+i*1.27)*6;
+    const bx=cx+Math.cos(a)*(outerRx+7), by=cy+Math.sin(a)*(outerRy+7);
+    ctx.save(); ctx.translate(bx,by); ctx.rotate(a+Math.PI/2);
+    const grad=ctx.createLinearGradient(0,-28-flicker,0,12);
+    grad.addColorStop(0,'#fff9aa'); grad.addColorStop(.35,'#ffc329'); grad.addColorStop(1,'#e32a00');
+    ctx.fillStyle=grad;
+    ctx.beginPath();
+    ctx.moveTo(0,-26-flicker);
+    ctx.bezierCurveTo(-10,-10,-9,8,0,13);
+    ctx.bezierCurveTo(10,8,10,-10,0,-26-flicker);
+    ctx.fill(); ctx.restore();
+  }
+}
+
+function drawLionRider(){
+  ctx.save();
+
+  // Reference-inspired gallop:
+  // big cats compress the spine, then extend it; hind legs drive forward/up,
+  // forelegs reach and catch. Use a 4-phase loop instead of wiggling 4 legs.
+  const runPower = Math.min(1, Math.abs(vx) / 6.5);
+  const t = (frame / 18) % 1;
+  const phase = Math.floor(t * 4);
+  const local = (t * 4) - phase;
+  const ease = local < .5 ? 2 * local * local : 1 - Math.pow(-2 * local + 2, 2) / 2;
+
+  let spineStretch = 0, bodyBob = 0, bodyTilt = 0;
+  let rearA, rearB, frontA, frontB;
+
+  if (phase === 0) { // gathered: paws under body, back slightly arched
+    spineStretch = -7 * runPower;
+    bodyBob = -2 * runPower;
+    bodyTilt = -0.04 * runPower;
+    rearA = {x:30, y:70}; rearB = {x:36 + ease*8, y:92 - ease*6};
+    frontA = {x:72, y:70}; frontB = {x:63 - ease*10, y:93};
+  } else if (phase === 1) { // launch: hind legs push back, front legs lift
+    spineStretch = 2 * runPower;
+    bodyBob = -5 * runPower;
+    bodyTilt = 0.03 * runPower;
+    rearA = {x:30, y:70}; rearB = {x:48 + ease*22, y:96 + ease*2};
+    frontA = {x:72, y:70}; frontB = {x:60 - ease*12, y:82 - ease*8};
+  } else if (phase === 2) { // extended flight: body long, forelegs forward, hind legs back
+    spineStretch = 12 * runPower;
+    bodyBob = -8 * runPower;
+    bodyTilt = 0.01 * runPower;
+    rearA = {x:26, y:69}; rearB = {x:60 - ease*10, y:90 - ease*4};
+    frontA = {x:76, y:69}; frontB = {x:100 - ease*12, y:88 + ease*6};
+  } else { // catch: forelegs land, hind legs tuck forward
+    spineStretch = 3 * runPower;
+    bodyBob = -3 * runPower;
+    bodyTilt = -0.03 * runPower;
+    rearA = {x:30, y:70}; rearB = {x:58 - ease*26, y:88 + ease*7};
+    frontA = {x:74, y:70}; frontB = {x:90 - ease*14, y:96};
+  }
+
+  // When almost still, use a calm standing pose.
+  if (runPower < .08) {
+    spineStretch = 0; bodyBob = 0; bodyTilt = 0;
+    rearA = {x:30, y:70}; rearB = {x:25, y:96};
+    frontA = {x:72, y:70}; frontB = {x:77, y:96};
+  }
+
+  const px = player.x;
+  const py = player.y + bodyBob;
+  ellipseShadow(px + 60, groundY + 12, 72 + Math.abs(spineStretch)*.8, 15, .24);
+
+  ctx.translate(px + 52, py + 56);
+  ctx.rotate(bodyTilt);
+  ctx.translate(-52, -56);
+
+  // far-side legs: muted silhouettes, partially hidden by body
+  ctx.strokeStyle='rgba(84,40,12,.34)';
+  ctx.lineWidth=8; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(rearA.x + 7, rearA.y - 1);
+  ctx.lineTo((rearA.x + rearB.x)/2 + 10, (rearA.y + rearB.y)/2);
+  ctx.lineTo(rearB.x + 11, rearB.y);
+  ctx.moveTo(frontA.x - 7, frontA.y - 1);
+  ctx.lineTo((frontA.x + frontB.x)/2 - 8, (frontA.y + frontB.y)/2);
+  ctx.lineTo(frontB.x - 9, frontB.y);
+  ctx.stroke();
+
+  // body: slightly lengthens/shortens with the gallop
+  const body=ctx.createLinearGradient(0,28,0,86);
+  body.addColorStop(0,'#ffc260'); body.addColorStop(.55,'#d78424'); body.addColorStop(1,'#8a4914');
+  ctx.fillStyle=body;
+  rr(8 - spineStretch*.25, 40, 82 + spineStretch, 36, 18);
+  ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.22)';
+  rr(20 - spineStretch*.15, 44, 46 + spineStretch*.4, 7, 4);
+  ctx.fill();
+
+  // shoulders and hip masses
+  ctx.fillStyle='rgba(135,70,18,.28)';
+  ctx.beginPath(); ctx.ellipse(74 + spineStretch*.45,58,19,21,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(26 - spineStretch*.18,59,18,20,0,0,Math.PI*2); ctx.fill();
+
+  // near-side legs: two main visible legs with jointed segments
+  function drawLeg(hip, paw, color){
+    const knee = {
+      x: hip.x * .55 + paw.x * .45,
+      y: Math.min(hip.y + 21, hip.y * .45 + paw.y * .55 - 4)
+    };
+    ctx.strokeStyle=color;
+    ctx.lineWidth=10;
+    ctx.lineCap='round';
+    ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(hip.x, hip.y);
+    ctx.lineTo(knee.x, knee.y);
+    ctx.lineTo(paw.x, paw.y);
+    ctx.stroke();
+
+    ctx.fillStyle='#241408';
+    ctx.beginPath();
+    ctx.ellipse(paw.x + 3, paw.y + 3, 12, 4.2, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  drawLeg(rearA, rearB, '#9a5318');
+  drawLeg(frontA, frontB, '#a65c19');
+
+  // tail follows spine motion
+  ctx.strokeStyle='#b8681c'; ctx.lineWidth=6; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(12 - spineStretch*.25,52);
+  ctx.bezierCurveTo(-16 - spineStretch*.4,34,-14,14,8,22 + Math.sin(frame/10)*2);
+  ctx.stroke();
+  ctx.fillStyle='#5a2b0f';
+  ctx.beginPath(); ctx.arc(8,22 + Math.sin(frame/10)*2,8,0,Math.PI*2); ctx.fill();
+
+  // mane + face move with stretched front
+  const headShift = spineStretch * .55;
+  const mane=ctx.createRadialGradient(88 + headShift,47,8,88 + headShift,47,36);
+  mane.addColorStop(0,'#9a5618'); mane.addColorStop(1,'#331507');
+  ctx.fillStyle=mane; ctx.beginPath(); ctx.arc(88 + headShift,47,34,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#e9a23c'; ctx.beginPath(); ctx.arc(93 + headShift,48,20,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#ffd28b'; ctx.beginPath(); ctx.ellipse(101 + headShift,57,13,9,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(98 + headShift,43,3.2,0,Math.PI*2); ctx.arc(106 + headShift,53,3,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#5c2b0e'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(103 + headShift,59,5,.2,Math.PI-.2); ctx.stroke();
+
+  // saddle
+  ctx.fillStyle='#b5142a'; rr(36,30,36,16,5); ctx.fill();
+  ctx.fillStyle='#ffe05a'; ctx.fillRect(39,30,30,4);
+
+  // rider absorbs gallop with subtle vertical counter-motion
+  ctx.save();
+  ctx.translate(51,18 - bodyBob*.25);
+  ctx.rotate(vx*.012 - bodyTilt*.7);
+  const suit=ctx.createLinearGradient(-12,-2,12,32); suit.addColorStop(0,'#51a5ff'); suit.addColorStop(1,'#0b3f9d');
+  ctx.fillStyle=suit; rr(-11,-2,22,33,6); ctx.fill();
+  ctx.strokeStyle='#ffe05a'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-11,9); ctx.lineTo(11,9); ctx.stroke();
+  ctx.strokeStyle='#ffd3ad'; ctx.lineWidth=5; ctx.lineCap='round'; ctx.beginPath(); ctx.moveTo(-9,3); ctx.lineTo(-24,-11); ctx.moveTo(9,3); ctx.lineTo(25,-10); ctx.stroke();
+  ctx.fillStyle='#ffd3ad'; ctx.beginPath(); ctx.arc(0,-14,11,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#2c160d'; ctx.beginPath(); ctx.arc(-4,-18,1.6,0,Math.PI*2); ctx.arc(5,-18,1.6,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#d91e36'; ctx.beginPath(); ctx.arc(1,-13,3.6,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#ffe33e'; ctx.beginPath(); ctx.moveTo(-14,-25); ctx.lineTo(14,-25); ctx.lineTo(8,-34); ctx.lineTo(-8,-34); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='#a87900'; ctx.lineWidth=2; ctx.stroke();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+function drawUnicycleRider(){
+  ctx.save();
+  ellipseShadow(player.x+29,ropeY+18,38,8,.2);
+  ctx.translate(player.x,player.y);
+  const lean=clamp(vx/5,-1,1)*.15;
+  ctx.save(); ctx.translate(29,40); ctx.rotate(lean); ctx.translate(-29,-40);
+
+  // wheel
+  ctx.lineWidth=6; ctx.strokeStyle='#111'; ctx.beginPath(); ctx.arc(29,72,16,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle='#d9e1e7'; ctx.lineWidth=1.6;
+  for(let i=0;i<8;i++){ const a=frame/7+i*Math.PI/4; ctx.beginPath(); ctx.moveTo(29,72); ctx.lineTo(29+Math.cos(a)*15,72+Math.sin(a)*15); ctx.stroke(); }
+  ctx.strokeStyle='#303030'; ctx.lineWidth=4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(29,56); ctx.lineTo(29,34); ctx.lineTo(15,21); ctx.moveTo(29,34); ctx.lineTo(44,21); ctx.stroke();
+
+  const suit=ctx.createLinearGradient(16,13,43,46); suit.addColorStop(0,'#55b3ff'); suit.addColorStop(1,'#063d96');
+  ctx.fillStyle=suit; rr(17,14,25,31,7); ctx.fill();
+  ctx.strokeStyle='#ffd3ad'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(18,22); ctx.lineTo(-9,18); ctx.moveTo(42,22); ctx.lineTo(67,18); ctx.stroke();
+  ctx.strokeStyle='#6b3b12'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(-18,17); ctx.lineTo(76,17); ctx.stroke();
+  ctx.fillStyle='#ffd3ad'; ctx.beginPath(); ctx.arc(29,4,12,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#202020'; ctx.beginPath(); ctx.arc(24,1,1.7,0,Math.PI*2); ctx.arc(34,1,1.7,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#d91e36'; ctx.beginPath(); ctx.arc(29,6,3.8,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#ffe33e'; ctx.beginPath(); ctx.moveTo(14,-10); ctx.lineTo(44,-10); ctx.lineTo(37,-19); ctx.lineTo(21,-19); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='#a87900'; ctx.lineWidth=2; ctx.stroke();
+
+  ctx.restore(); ctx.restore();
+}
+
+function drawMonkey(o){
+  ctx.save(); ctx.translate(o.x,o.y);
+  ctx.strokeStyle='#6b3d1f'; ctx.lineWidth=6; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(8,27); ctx.bezierCurveTo(-22,12,-8,-12,13,0); ctx.stroke();
+  const fur=ctx.createRadialGradient(22,20,4,22,20,24); fur.addColorStop(0,'#b9854a'); fur.addColorStop(1,'#563016');
+  ctx.fillStyle=fur; ctx.beginPath(); ctx.arc(22,20,20,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#d9a066'; ctx.beginPath(); ctx.ellipse(27,25,12,10,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#1d130d'; ctx.beginPath(); ctx.arc(15,15,2.5,0,Math.PI*2); ctx.arc(29,15,2.5,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#5d341b'; ctx.lineWidth=5; ctx.beginPath(); ctx.moveTo(38,28); ctx.lineTo(55,39); ctx.moveTo(8,30); ctx.lineTo(-8,42); ctx.stroke();
+  ctx.strokeStyle='#32180c'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(27,27,6,.1,Math.PI-.1); ctx.stroke();
+  ctx.restore();
+}
+
+function drawHud(){
+  ctx.save();
+  ctx.fillStyle='rgba(15,12,18,.72)'; rr(16,16,255,120,14); ctx.fill();
+  ctx.strokeStyle='rgba(255,231,150,.5)'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='#fff5c6'; ctx.font='800 20px system-ui'; ctx.textAlign='left';
+  ctx.fillText('STAGE ' + stage, 34, 48);
+  ctx.fillText('SCORE ' + score, 34, 78);
+  ctx.fillText('BEST ' + best, 34, 108);
+  ctx.fillStyle='#ff3e5d'; ctx.font='900 24px system-ui'; ctx.fillText('♥'.repeat(lives), 145, 49);
+
+  ctx.fillStyle='rgba(15,12,18,.68)'; rr(W-278,16,258,54,14); ctx.fill();
+  ctx.strokeStyle='rgba(255,231,150,.45)'; ctx.stroke();
+  ctx.fillStyle='#fff5c6'; ctx.font='800 20px system-ui'; ctx.textAlign='right';
+  ctx.fillText(stage===1?`링 통과 ${targetPasses}/5`:`원숭이 회피 ${targetPasses}/8`, W-40, 50);
+  ctx.restore();
+}
+
+function drawOverlay(title, sub){
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,.66)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(255,210,80,.18)'; rr(W/2-310,H/2-96,620,190,22); ctx.fill();
+  ctx.strokeStyle='rgba(255,235,160,.75)'; ctx.lineWidth=3; ctx.stroke();
+  ctx.textAlign='center'; ctx.fillStyle='#fff7d0';
+  ctx.font='900 42px system-ui'; ctx.fillText(title,W/2,H/2-22);
+  ctx.font='700 20px system-ui'; ctx.fillText(sub,W/2,H/2+32);
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  drawBackground();
+  if(stage===1){
+    drawFloor();
+    obstacles.forEach(drawRing);
+    drawParticles();
+    drawLionRider();
+  } else {
+    drawRopeStage();
+    obstacles.forEach(drawMonkey);
+    drawParticles();
+    drawUnicycleRider();
+  }
+  drawHud();
+
+  if(flashTimer>0){ ctx.fillStyle=`rgba(255,40,40,${flashTimer/60})`; ctx.fillRect(0,0,W,H); }
+
+  if(!started && !gameOver) drawOverlay(stage===1?'STAGE 1':'STAGE 2', stage===1?'사자를 타고 불 링의 중앙을 통과하세요':'외줄 위에서 원숭이를 피하세요');
+  if(stageClearTimer>0 && stage===2) drawOverlay('STAGE 1 CLEAR!', '외줄 위에서 원숭이를 피하세요');
+  if(gameOver){
+    if(stageClearTimer===-999) drawOverlay('ALL STAGES CLEAR!', '축하합니다! R 또는 클릭으로 다시 시작');
+    else drawOverlay('GAME OVER', '목숨을 모두 잃었습니다 · R 또는 클릭으로 재시작');
+  }
+}
+
+function loop(){ update(); draw(); requestAnimationFrame(loop); }
+reset(); loop();
+</script>
+</body>
+</html>
